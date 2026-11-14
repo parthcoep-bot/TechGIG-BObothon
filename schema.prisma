@@ -1,0 +1,576 @@
+
+
+
+
+
+
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+
+enum Role {
+  RESIDENT
+  TECHNICIAN
+  WARDEN
+  ADMIN
+  AGENT
+}
+
+enum TicketState {
+  OPEN
+  ASSIGNED
+  TECHNICIAN_ACKNOWLEDGED
+  TECHNICIAN_ONSITE
+  DIAGNOSING
+  WAITING_FOR_PART
+  WAITING_FOR_APPROVAL
+  REPAIR_IN_PROGRESS
+  REPAIR_CLAIMED_COMPLETE
+  VERIFICATION_PENDING
+  VERIFIED
+  CLOSED
+  ESCALATED
+  RECURRING_FAILURE
+  REOPENED
+  DELAYED
+  NO_ISSUE
+  NEEDS_INFORMATION
+}
+
+enum Priority {
+  P0
+  P1
+  P2
+  P3
+}
+
+enum WorkOrderStatus {
+  PENDING
+  ACKNOWLEDGED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum AssetStatus {
+  OPERATIONAL
+  AT_RISK
+  FAILED
+  DECOMMISSIONED
+}
+
+enum TechnicianStatus {
+  AVAILABLE
+  ON_JOB
+  OFF_SHIFT
+  UNRESPONSIVE
+}
+
+enum IntegrationMode {
+  LIVE
+  SANDBOX
+  DEMO
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum PaymentMode {
+  LIVE
+  SANDBOX
+  DEMO
+}
+
+enum HistoryKind {
+  FAILURE
+  REPAIR
+  SERVICE
+  INSPECTION
+  INSTALLATION
+}
+
+enum RunRisk {
+  LOW
+  ELEVATED
+  HIGH
+  CRITICAL
+}
+
+
+
+model User {
+  id          String   @id
+  name        String
+  email       String   @unique
+  phone       String?
+  role        Role
+  hostelId    String?
+  optOutComms Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  hostel        Hostel?        @relation(fields: [hostelId], references: [id])
+  technician    Technician?
+  tickets       Ticket[]       @relation("Reporter")
+  notifications Notification[]
+  auditLogs     AuditLog[]
+  approvals     Approval[]     @relation("Decider")
+
+  @@index([role])
+  @@index([hostelId])
+}
+
+
+
+model Hostel {
+  id              String  @id
+  name            String
+  city            String
+  totalResidents  Int
+  budgetMonthly   Int
+  budgetSpentMonth Int    @default(0)
+
+  users    User[]
+  blocks   Block[]
+  tickets  Ticket[]  @relation("HostelTickets")
+  SpendPolicy SpendPolicy?
+}
+
+model Block {
+  id       String @id
+  hostelId String
+  name     String
+  lat      Float
+  lng      Float
+
+  hostel Hostel @relation(fields: [hostelId], references: [id])
+  rooms  Room[]
+  assets Asset[]
+
+  @@index([hostelId])
+}
+
+model Room {
+  id      String @id
+  blockId String
+  floor   Int
+  label   String
+
+  block  Block   @relation(fields: [blockId], references: [id])
+  assets Asset[]
+
+  @@index([blockId])
+}
+
+
+
+model MachineType {
+  id          String @id
+  key         String @unique
+  name        String
+  description String?
+
+  assets Asset[]
+  parts  SparePart[] @relation("PartFits")
+}
+
+model Asset {
+  id               String      @id
+  tag              String      @unique
+  typeKey          String
+  blockId          String
+  roomId           String?
+  floor            Int
+  location         String
+  manufacturer     String?
+  model            String?
+  installedAt      DateTime
+  warrantyUntil    DateTime
+  lastServicedAt   DateTime?
+  servesResidents  Int
+  status           AssetStatus @default(OPERATIONAL)
+  reliability      Int         @default(100)
+  lat              Float
+  lng              Float
+
+  machineType      MachineType   @relation(fields: [typeKey], references: [key])
+  block            Block         @relation(fields: [blockId], references: [id])
+  room             Room?         @relation(fields: [roomId], references: [id])
+  history          MachineHistory[]
+  tickets          Ticket[]
+  workOrders       WorkOrder[]
+  predictions      MaintenancePrediction[]
+
+  @@index([blockId])
+  @@index([typeKey])
+  @@index([status])
+}
+
+model MachineHistory {
+  id          String      @id @default(cuid())
+  assetId     String
+  at          DateTime
+  kind        HistoryKind
+  summary     String
+  costPaise   Int?
+  techId      String?
+  ticketId    String?
+
+  asset  Asset   @relation(fields: [assetId], references: [id])
+
+  @@index([assetId])
+  @@index([at])
+}
+
+
+
+model Technician {
+  id              String           @id
+  userId          String           @unique
+  status          TechnicianStatus @default(AVAILABLE)
+  skills          String[]
+  certifications  String[]
+  shiftStartHour  Int
+  shiftEndHour    Int
+  openJobs        Int              @default(0)
+  completionRate  Int              @default(100)
+  lat             Float
+  lng             Float
+
+  user       User       @relation(fields: [userId], references: [id])
+  workOrders WorkOrder[]
+
+  @@index([status])
+}
+
+
+
+model SlaRule {
+  id             String   @id @default(cuid())
+  priority       Priority @unique
+  ackMinutes     Int
+  onsiteMinutes  Int
+  resolveMinutes Int
+  escalateTo     Role
+}
+
+model Ticket {
+  id               String      @id
+  hostelId         String?
+  assetId          String?
+  reporterId       String
+  text             String
+  state            TicketState @default(OPEN)
+  priority         Priority    @default(P3)
+  hazard           Boolean     @default(false)
+  hazardSignals    String[]
+  priorityScore    Int         @default(0)
+  source           String      @default("TEXT")
+  corroborations   Json?
+  priorityFactors  Json?
+  sla              Json?
+  slaBreaches      Json?
+  verification     Json?
+  spentPaise       Int         @default(0)
+  reopenCount      Int         @default(0)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  closedAt         DateTime?
+
+  reporter  User       @relation("Reporter", fields: [reporterId], references: [id])
+  hostel    Hostel?    @relation("HostelTickets", fields: [hostelId], references: [id])
+  asset     Asset?     @relation(fields: [assetId], references: [id])
+  events    TicketEvent[]
+  workOrders WorkOrder[]
+  agentRun  AgentRun?
+  approvals Approval[]
+
+  @@index([state])
+  @@index([priority])
+  @@index([assetId])
+  @@index([reporterId])
+  @@index([createdAt])
+}
+
+model TicketEvent {
+  id       String   @id @default(cuid())
+  ticketId String
+  at       DateTime @default(now())
+  kind     String
+  message  String
+  actor    String?
+  detail   Json?
+
+  ticket Ticket @relation(fields: [ticketId], references: [id])
+
+  @@index([ticketId])
+  @@index([at])
+}
+
+
+
+model WorkOrder {
+  id              String          @id
+  ticketId        String
+  assetId         String
+  technicianId    String?
+  status          WorkOrderStatus @default(PENDING)
+  diagnosis       String?
+  repairNotes     String?
+  etaMinutes      Int?
+  lat             Float?
+  lng             Float?
+  acknowledgedAt  DateTime?
+  arrivedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime        @default(now())
+
+  ticket     Ticket      @relation(fields: [ticketId], references: [id])
+  asset      Asset       @relation(fields: [assetId], references: [id])
+  technician Technician? @relation(fields: [technicianId], references: [id])
+  partsUsed  PartUsage[]
+  payments   Payment[]
+
+  @@index([ticketId])
+  @@index([technicianId])
+  @@index([status])
+}
+
+
+
+model SparePart {
+  id            String @id
+  name          String
+  unitCostPaise Int
+  category      String
+
+  fitsTypes  MachineType[] @relation("PartFits")
+  inventory  Inventory[]
+  partUsages PartUsage[]
+}
+
+model Inventory {
+  id        String @id @default(cuid())
+  partId    String
+  hostelId  String
+  quantity  Int    @default(0)
+  updatedAt DateTime @updatedAt
+
+  part SparePart @relation(fields: [partId], references: [id])
+
+  @@unique([partId, hostelId])
+}
+
+model PartUsage {
+  id          String @id @default(cuid())
+  workOrderId String
+  partId      String
+  quantity    Int    @default(1)
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id])
+  part      SparePart @relation(fields: [partId], references: [id])
+}
+
+
+
+model Vendor {
+  id         String @id
+  name       String
+  empanelled Boolean @default(false)
+  upiId      String?
+  categories String[]
+  contactEmail String?
+
+  payments Payment[]
+}
+
+
+
+model SpendPolicy {
+  id                          String @id @default(cuid())
+  hostelId                    String @unique
+  agentPerTransactionPaise    Int
+  agentPerTicketPaise         Int
+  agentDailyPaise             Int
+  wardenPerTransactionPaise   Int
+  hardCeilingPaise            Int
+
+  hostel Hostel @relation(fields: [hostelId], references: [id])
+}
+
+model Approval {
+  id          String         @id
+  ticketId    String
+  kind        String
+  amountPaise Int?
+  rationale   String
+  status      ApprovalStatus @default(PENDING)
+  decidedBy   String?
+  note        String?
+  createdAt   DateTime       @default(now())
+  decidedAt   DateTime?
+
+  ticket  Ticket @relation(fields: [ticketId], references: [id])
+  decider User?  @relation("Decider", fields: [decidedBy], references: [id])
+  payments Payment[]
+
+  @@index([status])
+  @@index([ticketId])
+}
+
+
+
+model Payment {
+  id          String      @id
+  workOrderId String
+  vendorId    String
+  partId      String?
+  approvalId  String?
+  amountPaise Int
+  mode        PaymentMode
+  protocol    Json
+  createdAt   DateTime    @default(now())
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id])
+  vendor    Vendor    @relation(fields: [vendorId], references: [id])
+  approval  Approval? @relation(fields: [approvalId], references: [id])
+  receipt   PaymentReceipt?
+
+  @@index([workOrderId])
+}
+
+model PaymentReceipt {
+  id         String   @id @default(cuid())
+  paymentId  String   @unique
+  receiptId  String
+  mandateRef String?
+  capturedAt DateTime @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id])
+}
+
+
+
+model VoiceSession {
+  id         String   @id @default(cuid())
+  userId     String
+  language   String
+  mode       String
+  turns      Json
+  ticketId   String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+
+
+model AgentRun {
+  id             String   @id
+  ticketId       String   @unique
+  goal           String
+  state          String
+  plan           Json
+  memory         Json?
+  waitingFor     String?
+  requiresHuman  Boolean  @default(false)
+  humanReason    String?
+  nextAction     String?
+  nextActionDueAt BigInt?
+  risk           RunRisk  @default(LOW)
+  finished       Boolean  @default(false)
+  timers         Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  ticket  Ticket       @relation(fields: [ticketId], references: [id])
+  actions AgentAction[]
+
+  @@index([state])
+  @@index([finished])
+}
+
+model AgentAction {
+  id        String   @id @default(cuid())
+  runId     String
+  at        BigInt
+  tool      String
+  input     Json?
+  data      Json?
+  ok        Boolean
+  error     String?
+  rationale String?
+
+  run AgentRun @relation(fields: [runId], references: [id])
+
+  @@index([runId])
+  @@index([tool])
+}
+
+
+
+model Notification {
+  id       String   @id @default(cuid())
+  to       String
+  title    String
+  body     String
+  channel  String
+  at       DateTime @default(now())
+  read     Boolean  @default(false)
+
+  user User @relation(fields: [to], references: [id])
+
+  @@index([to])
+  @@index([at])
+}
+
+
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  at        BigInt
+  actor     String
+  actorRole String
+  action    String
+  entity    String
+  entityId  String
+  before    Json?
+  after     Json?
+  outcome   String
+  rationale String?
+
+  actorUser User? @relation(fields: [actor], references: [id])
+
+  @@index([actor])
+  @@index([entity, entityId])
+  @@index([at])
+}
+
+
+
+model MaintenancePrediction {
+  id             String   @id @default(cuid())
+  assetId        String
+  scheduledFor   DateTime
+  recommendation String
+  basis          String
+  confidence     String
+  createdAt      DateTime @default(now())
+
+  asset Asset @relation(fields: [assetId], references: [id])
+
+  @@index([assetId])
+  @@index([scheduledFor])
+}
